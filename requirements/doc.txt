@@ -92,7 +92,6 @@ cryptography==41.0.2
     # via
     #   -r requirements/test.txt
     #   djfernet
-    #   secretstorage
 ddt==1.6.0
     # via -r requirements/test.txt
 django==3.2.20
@@ -187,10 +186,6 @@ isodate==0.6.1
     # via -r requirements/test.txt
 jaraco-classes==3.3.0
     # via keyring
-jeepney==0.8.0
-    # via
-    #   keyring
-    #   secretstorage
 jinja2==3.1.2
     # via
     #   -r requirements/test.txt
@@ -318,8 +313,6 @@ rfc3986==2.0.0
     # via twine
 rich==13.4.2
     # via twine
-secretstorage==3.3.3
-    # via keyring
 six==1.16.0
     # via
     #   -r requirements/test.txt
