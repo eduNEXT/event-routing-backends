@@ -6,6 +6,7 @@ import os
 from io import BytesIO
 from textwrap import dedent
 
+import requests
 from django.core.management.base import BaseCommand
 from libcloud.storage.providers import get_driver
 from libcloud.storage.types import Provider
