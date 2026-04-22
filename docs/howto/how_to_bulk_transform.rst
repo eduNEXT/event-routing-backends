@@ -12,6 +12,8 @@ For most sources and destinations we use `Apache Libcloud Object storage <https:
 
 The ``LRS`` destination provider is a special case that uses the usual event-routing-backends logic for sending events to Caliper and/or xAPI learning record stores.
 
+The ``LOGGER`` destination provider is another special case that skips all LRS and ``RouterConfiguration`` validation entirely. Events are still run through the full transformation pipeline so the ``xapi_tracking`` / ``caliper_tracking`` Python loggers fire, but no HTTP dispatch occurs. This is useful when an external log forwarder (e.g. `Vector <https://vector.dev/>`__) reads those loggers directly and you do not want to configure a dummy LRS.
+
 For the ``LOCAL`` provider, the path to the file(s) is a concatenation of the ``key``, which is the path to a top level directory, a ``container`` which is a single subdirectory name inside the ``key`` directory, and a ``prefix`` (if provided) will be appended to the container to determine the final path.
 
 ::
@@ -41,7 +43,9 @@ The command can work in a few distinct ways.
 
 Additionally all generated statements are written to a Python logger which can be configured to be ignored, save to a file, write standard out, or a log forwarder like `Vector <https://vector.dev/>`__ for more statement handling options. The two loggers are named ``xapi_tracking`` and ``caliper_tracking``, and are always running.
 
-**File(s) to logger** - For any destination you can use the ``--dry_run`` flag to perform tests on finding and transforming data before attempting to store it. Used in conjunction with loggers mentioned above, you can use Python log forwarding without the additional overhead of storing full files.
+**File(s) to logger only** - Use ``--destination_provider LOGGER`` to run the full transformation pipeline and emit all events through the ``xapi_tracking`` / ``caliper_tracking`` Python loggers without sending to any LRS. No ``--lrs-urls`` flag is needed, and no ``RouterConfiguration`` database entry is required. This is the recommended mode when an external log forwarder such as Vector reads the logger output directly.
+
+**File(s) to logger (dry run)** - For any destination you can use the ``--dry_run`` flag to perform tests on finding and transforming data before attempting to store it. Used in conjunction with loggers mentioned above, you can use Python log forwarding without the additional overhead of storing full files.
 
 .. warning::
     Events may be filtered differently in this command than in normal operation. Normally events pass through two layers of filters as described in `getting started <docs/getting_started.rst>`_.
@@ -107,6 +111,21 @@ You can also run these commands using a tutor wrapper:
 
 ::
     tutor local run lms python manage.py lms .....
+
+**Files to Logger (via xapi_tracking logger, no LRS required)**
+
+::
+
+    # Transform all events from S3 and emit them via the xapi_tracking logger.
+    # Vector (or any other log forwarder) can pick up the logger output directly.
+    # No --lrs-urls, no RouterConfiguration entry required.
+    python manage.py lms transform_tracking_logs \
+    --source_provider S3 \
+    --source_config '{"key": "...", "secret": "...", "container": "my-bucket", "prefix": "tracking/"}' \
+    --destination_provider LOGGER \
+    --transformer_type xapi \
+    --batch_size 1000 \
+    --sleep_between_batches_secs 3
 
 **Files to Files**
 

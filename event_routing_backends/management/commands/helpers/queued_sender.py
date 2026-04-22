@@ -76,6 +76,17 @@ class QueuedSender:
         self.queue(event)
         self.queued_lines += 1
 
+    def _process_for_logger(self):
+        """
+        Run events through the transformation pipeline so the xapi_tracking/caliper_tracking loggers fire.
+
+        No data is dispatched to any external system; the side-effect of calling the processor
+        (which writes to the Python logger) is the only goal.
+        """
+        print(f"Transforming {len(self.event_queue)} events for logger...")
+        for event in self.event_queue:
+            self.engine.processors[0](event)
+
     def queue(self, event):
         """
         Add an event to the queue, try to send if we've reached our batch size.
@@ -88,6 +99,8 @@ class QueuedSender:
                 print(f"Max queue size of {self.max_queue_size} reached, sending.")
                 if self.destination == "LRS":
                     self.send()
+                elif self.destination == "LOGGER":
+                    self._process_for_logger()
                 else:
                     self.store()
 
@@ -97,13 +110,16 @@ class QueuedSender:
 
     def send(self):
         """
-        Send to the LRS if we're configured for that, otherwise a no-op.
+        Send to the LRS if we're configured for that.
 
         Events are converted to the output xAPI / Caliper format in the router.
+        A no-op for LOGGER destination (logging fires through processors instead).
         """
         if self.destination == "LRS":
             print(f"Sending {len(self.event_queue)} events to LRS...")
             self.backend.bulk_send(self.event_queue, self.lrs_urls)
+        elif self.destination == "LOGGER":
+            pass
         else:
             print("Skipping send, we're storing with libcloud instead of an LRS.")
 
@@ -153,6 +169,9 @@ class QueuedSender:
             if self.destination is None or self.destination == "LRS":
                 print("Sending to LRS!")
                 self.send()
+            elif self.destination == "LOGGER":
+                print("Processing for logger!")
+                self._process_for_logger()
             else:
                 print("Storing via Libcloud!")
                 self.store()
