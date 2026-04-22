@@ -3,7 +3,9 @@ Class to handle batching and sending bulk transformed statements.
 """
 import datetime
 import json
+import logging
 import os
+import sys
 from io import BytesIO
 from time import sleep
 
@@ -78,14 +80,39 @@ class QueuedSender:
 
     def _process_for_logger(self):
         """
-        Run events through the transformation pipeline so the xapi_tracking/caliper_tracking loggers fire.
+        Transform queued events and write each xAPI/Caliper statement as a JSON line to stdout.
 
-        No data is dispatched to any external system; the side-effect of calling the processor
-        (which writes to the Python logger) is the only goal.
+        Bypasses the processor chain (which is gated by XAPI_EVENTS_ENABLED / RouterConfiguration)
+        and calls the registry directly — the only goal is serialised statements on stdout for
+        Vector (or any line-oriented consumer) to pick up.  Status messages go to stderr.
         """
-        print(f"Transforming {len(self.event_queue)} events for logger...")
+        from eventtracking.processors.exceptions import NoTransformerImplemented
+
+        registry = next(
+            (p.registry for p in self.backend.processors if getattr(p, 'registry', None)),
+            None,
+        )
+        if not registry:
+            print(f"No transformer registry found for backend {self.transformer_type}", file=sys.stderr)
+            return
+
+        print(f"Transforming {len(self.event_queue)} events for logger...", file=sys.stderr)
         for event in self.event_queue:
-            self.engine.processors[0](event)
+            try:
+                transformer = registry.get_transformer(event)
+                transformed = transformer.transform()
+            except NoTransformerImplemented:
+                continue
+            except Exception as exc:
+                print(f"Error transforming {event.get('name')}: {exc}", file=sys.stderr)
+                continue
+
+            if not isinstance(transformed, list):
+                transformed = [transformed]
+            xapi_logger = logging.getLogger('xapi_tracking')
+            for stmt in transformed:
+                if stmt and getattr(getattr(stmt, 'object', None), 'id', None):
+                    xapi_logger.info(stmt.to_json())
 
     def queue(self, event):
         """
@@ -96,7 +123,7 @@ class QueuedSender:
             if self.dry_run:
                 print("Dry run, skipping, but still clearing the queue.")
             else:
-                print(f"Max queue size of {self.max_queue_size} reached, sending.")
+                print(f"Max queue size of {self.max_queue_size} reached, sending.", file=sys.stderr)
                 if self.destination == "LRS":
                     self.send()
                 elif self.destination == "LOGGER":
@@ -170,7 +197,7 @@ class QueuedSender:
                 print("Sending to LRS!")
                 self.send()
             elif self.destination == "LOGGER":
-                print("Processing for logger!")
+                print("Processing for logger!", file=sys.stderr)
                 self._process_for_logger()
             else:
                 print("Storing via Libcloud!")
