@@ -1,6 +1,7 @@
 """
 Management command for transforming tracking log files.
 """
+import gzip
 import json
 import os
 from io import BytesIO
@@ -77,17 +78,17 @@ def transform_tracking_logs(
 
         chunks = _get_chunks(source, file)
 
-        for chunk in chunks:
-            chunk = chunk.decode('utf-8')
+        raw_bytes = b"".join(chunks)
+        if raw_bytes[:2] == b'\x1f\x8b':
+            raw_bytes = gzip.decompress(raw_bytes)
 
-            # Loop through this chunk, if we find a newline it's time to process
-            # otherwise just keep appending.
-            for char in chunk:
-                if char == "\n" and line:
-                    sender.transform_and_queue(line)
-                    line = ""
-                else:
-                    line += char
+        # Loop through file content; when we find a newline it's time to process
+        for char in raw_bytes.decode('utf-8'):
+            if char == "\n" and line:
+                sender.transform_and_queue(line)
+                line = ""
+            else:
+                line += char
 
         # Sometimes the file doesn't end with a newline, we try to use
         # any remaining bytes as a final line.
@@ -116,15 +117,15 @@ def get_dest_config_from_options(destination_provider, dest_config_options):
     """
     Prepare our destination configuration.
 
-    All None's if these are being sent to an LRS, or use values from the destination_configuration JSON option.
+    All None's if these are being sent to an LRS or LOGGER, or use values from the destination_configuration JSON option.
     """
-    if destination_provider != "LRS":
+    if destination_provider not in ("LRS", "LOGGER"):
         dest_config = json.loads(dest_config_options)
         try:
             dest_container = dest_config.pop("container")
             dest_prefix = dest_config.pop("prefix")
         except KeyError as e:
-            print("If not using the 'LRS' destination, the following keys must be defined in "
+            print("If not using the 'LRS' or 'LOGGER' destination, the following keys must be defined in "
                   "destination_config: 'prefix', 'container'")
             raise e
     else:
@@ -191,9 +192,9 @@ def get_libcloud_drivers(source_provider, source_config, destination_provider, d
         print(f"{source_provider} is not a valid source Libcloud provider.")
         raise
 
-    # There is no driver for LRS
-    destination_driver = "LRS"
-    if destination_provider != "LRS":
+    # There is no libcloud driver for LRS or LOGGER
+    destination_driver = destination_provider  # "LRS" or "LOGGER"
+    if destination_provider not in ("LRS", "LOGGER"):
         try:
             destination_provider = getattr(Provider, destination_provider)
             destination_cls = get_driver(destination_provider)
@@ -235,7 +236,9 @@ class Command(BaseCommand):
             '--destination_provider',
             type=str,
             default="LRS",
-            help="Either 'LRS' to use the default configured xAPI and/or Caliper servers"
+            help="Either 'LRS' to use the default configured xAPI and/or Caliper servers, "
+                 "'LOGGER' to only emit events via the xapi_tracking/caliper_tracking Python loggers "
+                 "(no LRS or RouterConfiguration required), "
                  "or an Apache Libcloud 'provider constant' from this list: "
                  "https://libcloud.readthedocs.io/en/stable/storage/supported_providers.html . "
                  "Ex: LOCAL for local storage or S3 for AWS S3.",
@@ -304,10 +307,11 @@ class Command(BaseCommand):
         lrs_urls = options.get('lrs_urls')
 
         source_file_list = validate_source_and_files(source_driver, source_container, source_prefix)
-        if dest_driver != "LRS":
+        if dest_driver not in ("LRS", "LOGGER"):
             validate_destination(dest_driver, dest_container, dest_prefix, source_file_list)
         else:
-            validate_lrs_routes(lrs_urls)
+            if dest_driver == "LRS":
+                validate_lrs_routes(lrs_urls)
             print(f"Found {len(source_file_list)} source files: ", *source_file_list, sep="\n")
 
         sender = QueuedSender(

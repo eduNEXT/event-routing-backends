@@ -1,6 +1,7 @@
 """
 Tests for the transform_tracking_logs management command.
 """
+import gzip
 import json
 import os
 from unittest.mock import MagicMock, patch
@@ -181,6 +182,25 @@ def command_options():
             },
             "whitelist": ["problem_check"],
         },
+        # LOGGER destination - no LRS or libcloud destination needed
+        {
+            "transformer_type": "xapi",
+            "source_provider": "MINIO",
+            "source_config": REMOTE_CONFIG,
+            "destination_provider": "LOGGER",
+            "sleep_between_batches_secs": 0,
+            "expected_results": {
+                "expected_batches_sent": 1,
+                "log_lines": [
+                    "Looking for log files in test_bucket/xapi_statements/*",
+                    "Finalizing 2 events to LOGGER",
+                    "Processing for logger!",
+                    "Transforming 2 events for logger...",
+                    "Queued 2 log lines, could not parse 2 log lines, skipped 8 log lines, sent 1 batches.",
+                ],
+            },
+            "registry_mapping": {"problem_check": 1},
+        },
     ]
 
     for option in options:
@@ -204,6 +224,15 @@ def _get_raw_log_stream(_, start_bytes, chunk_size):
     tracking_log_path = _get_tracking_log_file_path()
     with open(tracking_log_path, "rb") as current:
         yield current.read()
+
+
+def _get_gzip_log_stream(_, start_bytes, chunk_size):
+    """
+    Return gzip-compressed event json from current fixtures.
+    """
+    tracking_log_path = _get_tracking_log_file_path()
+    with open(tracking_log_path, "rb") as current:
+        yield gzip.compress(current.read())
 
 
 @pytest.mark.parametrize("command_opts", command_options())
@@ -423,8 +452,8 @@ def test_required_dest_libcloud_keys(capsys):
 
     captured = capsys.readouterr()
     print(captured.out)
-    assert "If not using the 'LRS' destination, the following keys must be defined in destination_config: " \
-           "'prefix', 'container'" in captured.out
+    assert "If not using the 'LRS' or 'LOGGER' destination, the following keys must be defined in " \
+           "destination_config: 'prefix', 'container'" in captured.out
 
 
 def test_get_source_config():
@@ -475,6 +504,16 @@ def test_get_dest_config_lrs():
     assert prefix is None
 
 
+def test_get_dest_config_logger():
+    """
+    Check that a LOGGER destination config returns appropriate None values (no libcloud config needed).
+    """
+    config, container, prefix = get_dest_config_from_options("LOGGER", None)
+    assert config is None
+    assert container is None
+    assert prefix is None
+
+
 def test_get_chunks():
     """
     Tests the retry functionality of the get_chunks function.
@@ -500,3 +539,89 @@ def test_get_chunks():
 
     # Make sure we got the correct number of retries
     assert fake_source_err.download_object_range_as_stream.call_count == 3
+
+
+@patch("event_routing_backends.management.commands.transform_tracking_logs.RouterConfiguration")
+def test_gzip_file_support(MockRouterConfiguration, mock_common_calls, capsys):
+    """
+    Test that gzip-compressed source files are transparently decompressed and processed.
+    """
+    mock_libcloud_provider, mock_libcloud_get_driver = mock_common_calls
+
+    MockRouterConfiguration.objects.filter.return_value.values_list.return_value = []
+
+    mm = MagicMock()
+    mock_log_object = MagicMock()
+    mock_log_object.__str__.return_value = "tracking.log.gz"
+    mock_log_object.name = "tracking.log.gz"
+    mock_log_object.size = 100
+
+    mm.return_value.iterate_container_objects.return_value = [mock_log_object]
+    mm.return_value.download_object_range_as_stream = _get_gzip_log_stream
+    mock_libcloud_get_driver.return_value = mm
+
+    mm2 = MagicMock()
+    mm2.registry.mapping = {"problem_check": 1}
+    mm2.return_value = {"foo": "bar"}
+    tracker.backends["event_transformer"].processors = [mm2]
+    for backend in tracker.backends["event_transformer"].backends.values():
+        backend.bulk_send = MagicMock()
+
+    call_command(
+        'transform_tracking_logs',
+        transformer_type="xapi",
+        source_provider="MINIO",
+        source_config=REMOTE_CONFIG,
+        sleep_between_batches_secs=0,
+    )
+
+    captured = capsys.readouterr()
+    assert "Streaming file tracking.log.gz..." in captured.out
+    # Same events should be parsed as from the uncompressed fixture
+    assert "Queued 2 log lines, could not parse 2 log lines, skipped 8 log lines" in captured.out
+
+
+def test_queued_sender_logger_send_is_noop(mock_common_calls, capsys):
+    """
+    Test that send() produces no output and dispatches nothing for LOGGER destination.
+    """
+    qs = QueuedSender("LOGGER", None, None, "xapi")
+    qs.event_queue = [{"name": "test_event"}]
+    qs.send()
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+
+
+def test_queued_sender_logger_process_for_logger(mock_common_calls, capsys):
+    """
+    Test that _process_for_logger calls the first processor for each queued event.
+    """
+    qs = QueuedSender("LOGGER", None, None, "xapi")
+    mock_processor = MagicMock(return_value={"foo": "bar"})
+    qs.engine.processors = [mock_processor]
+    qs.event_queue = [{"name": "event1"}, {"name": "event2"}]
+
+    qs._process_for_logger()
+
+    assert mock_processor.call_count == 2
+    captured = capsys.readouterr()
+    assert "Transforming 2 events for logger..." in captured.out
+
+
+def test_queued_sender_logger_finalize(mock_common_calls, capsys):
+    """
+    Test that finalize() routes through _process_for_logger for LOGGER destination.
+    """
+    qs = QueuedSender("LOGGER", None, None, "xapi")
+    mock_processor = MagicMock(return_value={"foo": "bar"})
+    qs.engine.processors = [mock_processor]
+    qs.queued_lines = 1
+    qs.event_queue = [{"name": "test_event"}]
+
+    qs.finalize()
+
+    captured = capsys.readouterr()
+    assert "Processing for logger!" in captured.out
+    assert "Transforming 1 events for logger..." in captured.out
+    assert "sent 1 batches" in captured.out

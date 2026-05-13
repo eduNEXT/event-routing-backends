@@ -3,7 +3,9 @@ Class to handle batching and sending bulk transformed statements.
 """
 import datetime
 import json
+import logging
 import os
+import sys
 from io import BytesIO
 from time import sleep
 
@@ -76,6 +78,42 @@ class QueuedSender:
         self.queue(event)
         self.queued_lines += 1
 
+    def _process_for_logger(self):
+        """
+        Transform queued events and write each xAPI/Caliper statement as a JSON line to stdout.
+
+        Bypasses the processor chain (which is gated by XAPI_EVENTS_ENABLED / RouterConfiguration)
+        and calls the registry directly — the only goal is serialised statements on stdout for
+        Vector (or any line-oriented consumer) to pick up.  Status messages go to stderr.
+        """
+        from eventtracking.processors.exceptions import NoTransformerImplemented
+
+        registry = next(
+            (p.registry for p in self.backend.processors if getattr(p, 'registry', None)),
+            None,
+        )
+        if not registry:
+            print(f"No transformer registry found for backend {self.transformer_type}", file=sys.stderr)
+            return
+
+        print(f"Transforming {len(self.event_queue)} events for logger...", file=sys.stderr)
+        for event in self.event_queue:
+            try:
+                transformer = registry.get_transformer(event)
+                transformed = transformer.transform()
+            except NoTransformerImplemented:
+                continue
+            except Exception as exc:
+                print(f"Error transforming {event.get('name')}: {exc}", file=sys.stderr)
+                continue
+
+            if not isinstance(transformed, list):
+                transformed = [transformed]
+            xapi_logger = logging.getLogger('xapi_tracking')
+            for stmt in transformed:
+                if stmt and getattr(getattr(stmt, 'object', None), 'id', None):
+                    xapi_logger.info(stmt.to_json())
+
     def queue(self, event):
         """
         Add an event to the queue, try to send if we've reached our batch size.
@@ -85,9 +123,11 @@ class QueuedSender:
             if self.dry_run:
                 print("Dry run, skipping, but still clearing the queue.")
             else:
-                print(f"Max queue size of {self.max_queue_size} reached, sending.")
+                print(f"Max queue size of {self.max_queue_size} reached, sending.", file=sys.stderr)
                 if self.destination == "LRS":
                     self.send()
+                elif self.destination == "LOGGER":
+                    self._process_for_logger()
                 else:
                     self.store()
 
@@ -97,13 +137,16 @@ class QueuedSender:
 
     def send(self):
         """
-        Send to the LRS if we're configured for that, otherwise a no-op.
+        Send to the LRS if we're configured for that.
 
         Events are converted to the output xAPI / Caliper format in the router.
+        A no-op for LOGGER destination (logging fires through processors instead).
         """
         if self.destination == "LRS":
             print(f"Sending {len(self.event_queue)} events to LRS...")
             self.backend.bulk_send(self.event_queue, self.lrs_urls)
+        elif self.destination == "LOGGER":
+            pass
         else:
             print("Skipping send, we're storing with libcloud instead of an LRS.")
 
@@ -153,6 +196,9 @@ class QueuedSender:
             if self.destination is None or self.destination == "LRS":
                 print("Sending to LRS!")
                 self.send()
+            elif self.destination == "LOGGER":
+                print("Processing for logger!", file=sys.stderr)
+                self._process_for_logger()
             else:
                 print("Storing via Libcloud!")
                 self.store()
